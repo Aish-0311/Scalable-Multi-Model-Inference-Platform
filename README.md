@@ -7,6 +7,14 @@ The guiding idea is simple: **the unit of deployment, scaling, routing,
 observability and rollback is a single `(model, version)` pair.** Everything
 else in the design follows from treating that pair as a first-class object.
 
+**Contents:** [1. Scope](#1-problem-scope-and-assumptions) ·
+[2. Image contract](#2-the-model-image-contract) ·
+[3. Architecture & resiliency](#3-architecture) ·
+[4. Infrastructure toolkit](#4-infrastructure-toolkit) ·
+[5. Monitoring & observability](#5-monitoring-and-observability) ·
+[6. Operations](#6-operations) ·
+[7. Trade-offs](#7-trade-offs-and-what-id-do-next)
+
 ---
 
 ## 1. Problem, scope and assumptions
