@@ -572,7 +572,7 @@ when a version's request rate stays near zero.
 IRSA for pod-level AWS permissions (no node-wide credentials); private ECR with
 scan-on-push; Cosign signature verification enforced at admission; default-deny
 NetworkPolicies so models can only reach the gateway and their explicit
-dependencies; secrets via keyvault, never in values files; 
+dependencies; AWS Secrets Manager/Secrets Store CSI Driver, never in values files; 
 non-root, read-only rootfs, dropped capabilities.
 
 ---
