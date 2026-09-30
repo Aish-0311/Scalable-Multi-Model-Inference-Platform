@@ -3,7 +3,7 @@
 A design for a platform that hosts many ML models, and many versions of each
 model, as independently scalable HTTP services on AWS.
 
-The guiding idea is simple: **the unit of deployment, scaling, routing,
+The guiding idea: **the unit of deployment, scaling, routing,
 observability and rollback is a single `(model, version)` pair.** Everything
 else in the design follows from treating that pair as a first-class object.
 
@@ -42,17 +42,13 @@ to any of them would change specific choices, not the overall shape.
 | A6 | Callers are internal services and/or authenticated external clients | Auth happens at the edge, not in every model container |
 | A7 | The ML team owns model correctness; the platform team owns availability | Defines the contract in §2 as the hard boundary |
 
-### Non-goals
-
-Training, feature stores, experiment tracking, labelling, and offline
-evaluation. This is the serving plane only.
 
 ---
 
 ## 2. The model image contract
 
 This is the most important part of the design. Everything downstream —
-autoscaling, health checking, routing, dashboards, canaries — depends on every
+autoscaling, health checking, routing, dashboards, — depends on every
 model image behaving the same way. Without a contract, the platform has to
 special-case each model, and it stops being a platform.
 
@@ -63,12 +59,12 @@ The ML team publishes an image that satisfies:
 - Listens on HTTP port `8080`.
 - Serves inference at `POST /predict` (or whatever the org standardises on);
   the platform does not care about the request/response schema.
-- Honours `SIGTERM`: stops accepting new requests, drains in-flight ones,
+- stops accepting new requests, drains in-flight ones,
   exits within `terminationGracePeriodSeconds`.
 
 **Health**
 
-- `GET /healthz` — liveness. Cheap. Fails only if the process is wedged.
+- `GET /health` — liveness. Cheap. Fails only if the process is wedged.
 - `GET /ready` — readiness. Returns 200 **only** once weights are loaded and
   the model can serve a real request. This is what makes zero-downtime rollout
   possible, and it is the endpoint most commonly implemented wrongly (returning
@@ -79,7 +75,7 @@ The ML team publishes an image that satisfies:
 - `GET /metrics` — Prometheus format. Must include request count, error count,
   and latency histogram. May include model-specific signals (input feature
   statistics, output distribution, batch size, token counts).
-- Logs to stdout as JSON, echoing an inbound `X-Request-Id`.
+- Logs as JSON, as inbound `X-Request-Id`.
 
 **Metadata** (OCI image labels, read by CI and by policy checks)
 
@@ -121,14 +117,14 @@ flowchart TB
             GW["Envoy Gateway<br/>path + header routing<br/>authn, rate limit, retries"]
         end
 
-        subgraph ns1["namespace: model-fraud"]
-            D1["Deployment fraud v1.2.0<br/>HPA 2-20"]
-            D2["Deployment fraud v1.3.0<br/>HPA 1-10"]
+        subgraph ns1["namespace: model-deployment1"]
+            D1["Deployment deployment1 v1.2.0<br/>HPA 2-20"]
+            D2["Deployment deployment1 v1.3.0<br/>HPA 1-10"]
         end
 
-        subgraph ns2["namespace: model-nlu"]
-            D3["Deployment nlu v4.0.1 (GPU)<br/>HPA 1-8"]
-            D4["Deployment nlu v3.9.0<br/>KEDA scale-to-zero"]
+        subgraph ns2["namespace: model-deployment2"]
+            D3["Deployment deployment2 v4.0.1 (GPU)<br/>HPA 1-8"]
+            D4["Deployment deployment2 v3.9.0<br/>KEDA scale-to-zero"]
         end
 
         subgraph plat[Platform services]
@@ -162,9 +158,9 @@ Every version gets a stable, predictable URL. The gateway routes purely on
 path, so adding a version is a config change, never a code change.
 
 ```
-POST /models/fraud/v1.2.0/predict   -> Service fraud-v1-2-0
-POST /models/fraud/v1.3.0/predict   -> Service fraud-v1-3-0
-POST /models/fraud/predict          -> alias, weighted across live versions
+POST /models/deployment1/v1.2.0/predict   -> Service deployment1-v1-2-0
+POST /models/deployment1/v1.3.0/predict   -> Service deployment1-v1-3-0
+POST /models/deployment1/predict          -> alias, weighted across live versions
 ```
 
 The unversioned alias is what most callers use. It is the single control point
@@ -173,11 +169,11 @@ and callers never change their URL.
 
 ```mermaid
 flowchart LR
-    IN[POST /models/fraud/predict] --> GW{Envoy Gateway}
+    IN[POST /models/deployment1/predict] --> GW{Envoy Gateway}
 
-    GW -->|"weight 90%"| SVCA[Service fraud-v1-2-0]
-    GW -->|"weight 10%<br/>canary"| SVCB[Service fraud-v1-3-0]
-    GW -.->|"mirror 5%<br/>responses discarded"| SVCC[Service fraud-v1-4-0-rc]
+    GW -->|"weight 90%"| SVCA[Service deployment1-v1-2-0]
+    GW -->|"weight 10%<br/>gradual rollout"| SVCB[Service deployment1-v1-3-0]
+    GW -.->|"mirror 5%<br/>responses discarded"| SVCC[Service deployment1-v1-4-0-rc]
 
     SVCA --> PA1[pod] & PA2[pod] & PA3[pod]
     SVCB --> PB1[pod]
@@ -200,8 +196,8 @@ PodDisruptionBudget, rendered from one shared Helm chart.
 
 This gives, essentially for free:
 
-- **Independent scaling** — the explicit requirement. A spike on `nlu v4` does
-  not provision capacity for `fraud v1`.
+- **Independent scaling** — the explicit requirement. A spike on `deployment2 v4`
+  does not provision capacity for `deployment1 v1`.
 - **Independent failure domains** — a model that leaks memory and OOMs takes
   down only its own pods.
 - **Independent resource shapes** — a GPU model and a small CPU model do not
@@ -294,7 +290,7 @@ degrading everything around it.
 | Failure | Containment |
 |---|---|
 | One model version OOMs / crashloops | Limits + own Deployment; other versions unaffected; alert fires on crashloop |
-| Bad model version passes CI | Shadow → 5% canary → automated rollback on SLO burn |
+| Bad model version passes CI | Shadow → 5% gradual rollout → automated rollback on SLO burn |
 | GPU node fails | Karpenter replaces; PDB + spread keep the version serving |
 | AZ outage | Multi-AZ spread; capacity headroom sized for n−1 AZ |
 | Gateway failure | Multiple replicas across AZs behind ALB; no model state in gateway |
@@ -348,13 +344,13 @@ Service, HPA/ScaledObject, PDB, ServiceAccount, NetworkPolicy, ServiceMonitor
 and HTTPRoute from a small values file:
 
 ```yaml
-model: fraud
+model: deployment1
 version: 1.3.0
-image: <acct>.dkr.ecr.eu-west-1.amazonaws.com/fraud:1.3.0
+image: <acct>.dkr.ecr.eu-west-1.amazonaws.com/deployment1:1.3.0
 accelerator: cpu
 resources: { cpu: "2", memory: 4Gi }
 scaling: { min: 2, max: 20, targetConcurrency: 8 }
-rollout: { strategy: canary, steps: [5, 25, 50, 100] }
+rollout: { strategy: gradual, steps: [5, 25, 50, 100] }
 ```
 
 That file is the entire surface area the ML team touches to ship a model.
@@ -367,25 +363,8 @@ App-of-apps, reconciling from Git. Chosen over push-based CI deploys because it
 gives drift detection, a clear "what is actually running" answer, and — since
 rollout state lives in Git — rollback is `git revert`.
 
-**Argo Rollouts** drives the canary: traffic steps, analysis against Prometheus
+**Argo Rollouts** drives the gradual rollout: traffic steps, analysis against Prometheus
 between steps, automatic abort on failure.
-
-### Guardrails
-
-**Kyverno** policies enforce the §2 contract at admission: required labels,
-probes present, resource limits set, images only from our ECR registry and
-signed (Cosign), non-root, read-only rootfs. A model that skips the contract
-cannot reach the cluster.
-
-### Considered and rejected
-
-| Option | Why not |
-|---|---|
-| **SageMaker Endpoints** | Genuinely good fit for the stated problem and would be the right call for a small team. Rejected because multi-version traffic splitting, per-version canary analysis, and unified observability across CPU and GPU are more awkward and more expensive at this model count than doing it on EKS — and it constrains the ML team's image to SageMaker's contract rather than ours. |
-| **KServe / Seldon** | Solves model serving well, but its value is in the model-server abstractions (transformers, explainers, batching). Our models arrive as *already-complete HTTP servers*, so we'd inherit a large CRD surface for the one feature we need — routing — while giving up direct control of the rollout. Worth revisiting if the platform later owns model packaging. |
-| **AWS CDK / Pulumi** | Fine tools. Terraform wins on plan reviewability and on the team already knowing it; using a general-purpose language for infra invites logic that is hard to review in a PR. |
-| **Kustomize instead of Helm** | Per-version values are genuinely parametric, not overlay-shaped. Helm's templating fits better, and the chart version gives a clean upgrade unit. |
-| **Service mesh (Istio/Linkerd) for everything** | The gateway already provides the routing, retries and mTLS we need at the edge. A full mesh adds a sidecar per model pod and meaningful operational weight for marginal gain at this scale. |
 
 ---
 
@@ -489,7 +468,7 @@ questions:
 
 1. **Fleet** — every version, sorted by error budget consumed. The on-call view.
 2. **Model** — one version in depth, with the previous version overlaid.
-3. **Rollout** — canary vs. stable, side by side. The promote/abort view.
+3. **Rollout** — gradual rollout vs. stable, side by side. The promote/abort view.
 
 ---
 
@@ -521,7 +500,7 @@ sequenceDiagram
     Prom-->>Argo: shadow: errors, latency, score distribution
     Note over Argo: shadow gate — real traffic,<br/>responses discarded
 
-    Argo->>Prod: 5% canary
+    Argo->>Prod: 5% gradual rollout
     Prom-->>Argo: AnalysisRun vs. stable baseline
     Argo->>Prod: 25%
     Prom-->>Argo: AnalysisRun
@@ -538,12 +517,12 @@ sequenceDiagram
 
 The steps that matter:
 
-- **Shadow before canary.** Mirrored production traffic with responses
+- **Shadow before gradual rollout.** Mirrored production traffic with responses
   discarded catches "the model loads but scores everything as 0.5" — a class of
-  failure that a 5% canary will also catch, but only after 5% of users have
+  failure that a 5% gradual rollout will also catch, but only after 5% of users have
   seen it.
 - **Automated analysis, not human judgement.** Argo Rollouts queries Prometheus
-  between steps and compares canary against the stable baseline on error rate,
+  between steps and compares the new version against the stable baseline on error rate,
   p95 latency, and prediction distribution. Promotion is the default; a failing
   comparison aborts automatically.
 - **Rollback is a weight change.** The previous version is still deployed and
@@ -566,9 +545,9 @@ interruptible and reversible. Add-ons (CNI, CoreDNS, CSI) tracked as Terraform
 versions, not `latest`.
 
 **Platform chart upgrades.** Chart version bumped in the platform repo, rolled
-to a canary model first, then fleet-wide. Because every model renders from the
+to a gradual rollout model first, then fleet-wide. Because every model renders from the
 same chart, a probe fix or a security default lands everywhere — which is
-powerful and therefore needs the canary step.
+powerful and therefore needs the gradual rollout step.
 
 ### 6.3 Rollback, by layer
 
@@ -593,8 +572,8 @@ when a version's request rate stays near zero.
 IRSA for pod-level AWS permissions (no node-wide credentials); private ECR with
 scan-on-push; Cosign signature verification enforced at admission; default-deny
 NetworkPolicies so models can only reach the gateway and their explicit
-dependencies; secrets via External Secrets Operator from Secrets Manager, never
-in values files; non-root, read-only rootfs, dropped capabilities.
+dependencies; secrets via keyvault, never in values files; 
+non-root, read-only rootfs, dropped capabilities.
 
 ---
 
@@ -617,21 +596,12 @@ in values files; non-root, read-only rootfs, dropped capabilities.
   deployed endpoint is the next thing I'd add, and it's a prerequisite for
   taking this into a regulated environment.
 
-**Known weak points**
-
-- Cold start on scale-to-zero versions is bounded by image size and weight
-  loading; large GPU models may simply not be viable at zero replicas.
-- The contract in §2 is a real burden on the ML team on day one. The platform
-  team should pay that cost down by shipping a base image that implements it.
-- Automated canary analysis is only as good as the baseline metrics; a model
-  with low traffic won't produce a statistically meaningful comparison, and
-  those versions need a human in the loop.
 
 **First three things I'd build**
 
 1. The Helm chart and the contract conformance test — everything else depends
    on them.
 2. The rollout dashboard and the Argo Rollouts analysis template, so the first
-   canary is trustworthy.
+   gradual rollout is trustworthy.
 3. Cost attribution per model version, because it's much harder to add
    retroactively than to include from the start.
